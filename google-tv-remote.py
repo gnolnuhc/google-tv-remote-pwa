@@ -357,7 +357,7 @@ body { background: #0a0a0a; color: white; margin: 0; min-height: 100vh; display:
 <button class="kb-toggle" id="kbToggle"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg><span id="kbToggleLabel">Keyboard</span></button>
 <div class="kb-panel" id="kbPanel">
 <div class="kb-inputrow">
-<input class="kb-field" id="kbInput" type="text" placeholder="Type on your phone…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="search" enterkeyhint="search" />
+<input class="kb-field" id="kbInput" type="text" placeholder="Type on your phone… 在此输入" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="search" enterkeyhint="search" />
 <button class="kb-send" id="kbSend">Send</button>
 </div>
 <div class="kb-tools">
@@ -739,6 +739,7 @@ function initKeyboard(){
     haptic();
   }
   function scheduleDelta(){
+    if(isComposing) return; // pinyin uncommitted — wait for compositionend
     clearTimeout(deb);
     deb = setTimeout(()=>sendDelta(input.value), 250); // read fresh at fire time
   }
@@ -759,6 +760,15 @@ function initKeyboard(){
     haptic();
   });
   input.addEventListener('input', scheduleDelta);
+  // CJK IME (e.g. iOS Pinyin): while composing, the field holds uncommitted
+  // pinyin — never send that to the TV. Send only the committed result.
+  let isComposing = false;
+  input.addEventListener('compositionstart', ()=>{ isComposing = true; clearTimeout(deb); });
+  input.addEventListener('compositionend', ()=>{
+    isComposing = false;
+    clearTimeout(deb);
+    sendDelta(input.value);
+  });
   input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitSearch(); } });
   document.getElementById('kbSend').addEventListener('click', ()=>{ clearTimeout(deb); sendDelta(input.value); });
   document.getElementById('kbEnter').addEventListener('click', ()=>{ submitSearch(); });
@@ -773,6 +783,7 @@ function initKeyboard(){
     sendDelta('');
   });
   document.getElementById('kbClose').addEventListener('click', ()=>{
+    isComposing = false; // in case compositionend never fires on blur
     panel.classList.remove('open'); toggleLabel.textContent='Keyboard'; input.blur();
   });
 }
