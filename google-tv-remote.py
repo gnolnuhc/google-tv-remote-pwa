@@ -301,6 +301,19 @@ body { background: #0a0a0a; color: white; margin: 0; min-height: 100vh; display:
 .spinner { width: 14px; height: 14px; border: 2px solid rgba(0,0,0,.2); border-top-color: black; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .status-text { transition: all 0.3s ease; }
+.kb-toggle { width: 100%; height: 50px; border-radius: 16px; background: transparent; border: 1px dashed rgba(255,255,255,.18); color: rgba(255,255,255,.75); font-size: 14px; font-weight: 600; margin-top: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; touch-action: manipulation; }
+.kb-toggle:active { background: rgba(255,255,255,.06); }
+.kb-panel { display: none; margin-top: 12px; background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.1); border-radius: 16px; padding: 12px; }
+.kb-panel.open { display: block; }
+.kb-inputrow { display: flex; gap: 8px; }
+.kb-field { flex: 1; background: #0c0c0d; border: 1px solid rgba(255,255,255,.14); color: #fff; border-radius: 12px; padding: 12px 14px; font-size: 16px; outline: none; min-width: 0; font-family: inherit; }
+.kb-field:focus { border-color: #0a84ff; }
+.kb-send { background: #0a84ff; border: 0; color: #fff; border-radius: 12px; padding: 0 18px; font-size: 14px; font-weight: 700; cursor: pointer; touch-action: manipulation; }
+.kb-send:active { background: #0066cc !important; }
+.kb-tools { display: flex; gap: 8px; margin-top: 8px; }
+.kb-tool { flex: 1; background: #2c2c2e; border: 1px solid rgba(255,255,255,.08); color: #fff; border-radius: 10px; padding: 9px 0; font-size: 12px; font-weight: 600; cursor: pointer; touch-action: manipulation; }
+.kb-tool:active { background: #4a4a4c !important; }
+.kb-close { width: 100%; background: transparent; border: 0; color: rgba(255,255,255,.4); font-size: 11px; margin-top: 8px; cursor: pointer; }
 
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(12px) scale(.96); background: rgba(40,40,42,.9); backdrop-filter: blur(20px); color: white; padding: 12px 18px; border-radius: 24px; font-size: 13px; font-weight: 600; opacity: 0; pointer-events: none; transition: all .3s; border: 1px solid rgba(255,255,255,.1); }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
@@ -341,6 +354,19 @@ body { background: #0a0a0a; color: white; margin: 0; min-height: 100vh; display:
 <button class="action" data-key="SETTINGS">Settings</button>
 </div>
 <button class="wide" data-key="MEDIA_PLAY_PAUSE">▶︎  Play / Pause</button>
+<button class="kb-toggle" id="kbToggle"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg><span id="kbToggleLabel">Keyboard</span></button>
+<div class="kb-panel" id="kbPanel">
+<div class="kb-inputrow">
+<input class="kb-field" id="kbInput" type="text" placeholder="Type on your phone…" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="search" enterkeyhint="search" />
+<button class="kb-send" id="kbSend">Send</button>
+</div>
+<div class="kb-tools">
+<button class="kb-tool" id="kbBackspace">⌫ Delete</button>
+<button class="kb-tool" id="kbEnter">⏎ Search</button>
+<button class="kb-tool" id="kbClear">Clear</button>
+</div>
+<button class="kb-close" id="kbClose">Hide keyboard</button>
+</div>
 <div class="hint"><div class="line"></div> iPhone • Glassmorphism • Haptics <div class="line"></div></div>
 </div>
 <p style="text-align:center;font-size:11px;opacity:.25;margin-top:16px">Add to Home Screen: Share → Add to Home Screen</p>
@@ -689,7 +715,58 @@ function initTrackpad(){
     if(mouseDown){ mouseDown=false; pad.classList.remove('pressed','tracking'); Object.values(arrows).forEach(a=>a.classList.remove('active')); }
   });
 }
-document.addEventListener('DOMContentLoaded', ()=>{ setupAudioUnlock(); addPressVisuals(); initTrackpad(); fetchStatus(); unlockAudio(); });
+function initKeyboard(){
+  const panel = document.getElementById('kbPanel');
+  const input = document.getElementById('kbInput');
+  const toggleLabel = document.getElementById('kbToggleLabel');
+  if(!panel || !input || !toggleLabel) return;
+  let deb = null;
+  // Live typing: send the whole field per keystroke (debounced). The TV-side
+  // IME batch edit replaces the full field content, so the TV mirrors the phone.
+  function typeText(v){
+    if(v.length > 500) v = v.slice(0, 500);
+    fetch('/type?text='+encodeURIComponent(v), {cache:'no-store'}).catch(()=>{});
+  }
+  function scheduleType(){
+    const v = input.value;
+    clearTimeout(deb);
+    deb = setTimeout(()=>typeText(v), 250);
+  }
+  function submitSearch(){
+    clearTimeout(deb);
+    typeText(input.value);
+    setTimeout(()=>{ fetch('/press?key=ENTER', {cache:'no-store'}).catch(()=>{}); }, 350);
+    toast('Searching\u2026');
+  }
+  document.getElementById('kbToggle').addEventListener('click', ()=>{
+    const opening = !panel.classList.contains('open');
+    panel.classList.toggle('open', opening);
+    toggleLabel.textContent = opening ? 'Keyboard \u2014 hide' : 'Keyboard';
+    // iOS PWA: focus() must run synchronously inside this tap, after the panel
+    // is visible — any async gap and iOS silently refuses to open the keyboard.
+    if(opening) input.focus();
+    playClick('KEYBOARD');
+    haptic();
+  });
+  input.addEventListener('input', scheduleType);
+  input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitSearch(); } });
+  document.getElementById('kbSend').addEventListener('click', ()=>{ clearTimeout(deb); typeText(input.value); playClick('KEYBOARD'); haptic(); });
+  document.getElementById('kbEnter').addEventListener('click', ()=>{ submitSearch(); playClick('KEYBOARD'); haptic(); });
+  document.getElementById('kbBackspace').addEventListener('click', ()=>{
+    if(input.value.length) input.value = input.value.slice(0,-1);
+    clearTimeout(deb);
+    typeText(input.value); // full-string replace deletes the char on the TV too
+    playClick('KEYBOARD'); haptic();
+  });
+  document.getElementById('kbClear').addEventListener('click', ()=>{
+    input.value=''; clearTimeout(deb); typeText('');
+    playClick('KEYBOARD'); haptic();
+  });
+  document.getElementById('kbClose').addEventListener('click', ()=>{
+    panel.classList.remove('open'); toggleLabel.textContent='Keyboard'; input.blur();
+  });
+}
+document.addEventListener('DOMContentLoaded', ()=>{ setupAudioUnlock(); addPressVisuals(); initTrackpad(); initKeyboard(); fetchStatus(); unlockAudio(); });
 let pressQueue = [];
 let isProcessing = false;
 let lastFire = 0;
@@ -1049,6 +1126,41 @@ def main():
         except Exception as e:
             return jsonify({"status":"ok","key":key, "live": False, "reconnecting": True, "queued": True}), 200
 
+    @app.route("/type")
+    def type_route():
+        """Send phone-keyboard text to the TV's focused field via the remote IME channel."""
+        text = request.args.get("text", "")
+        if len(text) > 500:
+            text = text[:500]
+        async def _ensure_connected_and_type():
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                try:
+                    if not has_live_connection(remote):
+                        try:
+                            await remote.async_connect()
+                            set_connection_state(live=True, reconnecting=False, error=None)
+                        except Exception:
+                            await asyncio.sleep(0.5)
+                            continue
+                    # send_text is non-blocking (buffers into the protocol).
+                    # An emptied field mirrors as a single space: the library rejects
+                    # empty strings, and the next keystroke's full-string replace heals it.
+                    remote.send_text(text if text else " ")
+                    set_connection_state(live=True, reconnecting=False, error=None)
+                    return True
+                except Exception:
+                    if attempt >= max_attempts - 1:
+                        raise
+                    await asyncio.sleep(0.3)
+            return False
+        # SMOOTH: Fire and forget - return immediately, no blocking
+        try:
+            asyncio.run_coroutine_threadsafe(_ensure_connected_and_type(), loop)
+            return jsonify({"status": "ok", "typed": text, "queued": True}), 200
+        except Exception:
+            return jsonify({"status": "ok", "typed": text, "live": False, "reconnecting": True, "queued": True}), 200
+
     local_ip = get_local_ip()
     print(f"\n🚀 Premium Remote running! (Fixed concurrency + WOL + Last IP + Trackpad + Idle Fix + Status UI)")
     print(f"   Mac: http://localhost:{PORT}")
@@ -1057,6 +1169,7 @@ def main():
     print(f"   Trackpad: Swipe for direction, Tap for OK")
     print(f"   Keepalive: 10s to prevent 16s idle disconnect")
     print(f"   Status: /status endpoint for UI polling")
+    print(f"   Keyboard: /type endpoint for phone keyboard input")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
 
 if __name__ == "__main__":
