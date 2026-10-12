@@ -49,6 +49,7 @@ If your TV shows a PIN when you run the script, it’s compatible.
 - **Power-cycle recovery** — detects power off/on, recreates `AndroidTVRemote` instance, increases DPAD attempts to 6× when offline >20s
 - **iOS audio unlock** — global capture listeners + silent buffer unlock, sound plays on first tap/swipe even after `preventDefault`
 - **Clean controls** — Power, Home, Back, Vol, Mute, Input, Settings, Play/Pause, D-Pad only
+- **Keyboard input** — type on your phone, text lands in the TV's focused field (e.g. YouTube search) via the remote IME channel; collapsible panel, live typing, zero changes to the existing UI
 
 ---
 
@@ -203,7 +204,6 @@ __pycache__/
 ### Roadmap
 
 - [ ] Volume slider
-- [ ] Keyboard input
 - [ ] Configurable app launch buttons (via `send_launch_app_command` — package names vary by brand)
 - [ ] Docker image
 - [ ] Auto-reconnect for multiple TVs
