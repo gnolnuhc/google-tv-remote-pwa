@@ -739,7 +739,6 @@ function initKeyboard(){
     haptic();
   }
   function scheduleDelta(){
-    if(isComposing) return; // pinyin uncommitted — wait for compositionend
     clearTimeout(deb);
     deb = setTimeout(()=>sendDelta(input.value), 250); // read fresh at fire time
   }
@@ -759,15 +758,26 @@ function initKeyboard(){
     playClick('KEYBOARD');
     haptic();
   });
-  input.addEventListener('input', scheduleDelta);
-  // CJK IME (e.g. iOS Pinyin): while composing, the field holds uncommitted
-  // pinyin — never send that to the TV. Send only the committed result.
+  input.addEventListener('input', (e)=>{
+    // CJK IME (iOS Pinyin etc.): input events during composition carry
+    // uncommitted pinyin — never send those. The committed text arrives in a
+    // final input event that is NOT composing. Trust the event's own
+    // isComposing over the flag, so a missed compositionend can never
+    // wedge all future typing.
+    const composingNow = (e && e.isComposing !== undefined) ? e.isComposing : isComposing;
+    if(composingNow) return;
+    isComposing = false;
+    scheduleDelta();
+  });
+  // CJK IME: compositionstart/end bracket the pinyin composition.
+  // compositionend is only a fast path — send after a short settle delay,
+  // because iOS updates input.value a beat after the event fires.
   let isComposing = false;
   input.addEventListener('compositionstart', ()=>{ isComposing = true; clearTimeout(deb); });
   input.addEventListener('compositionend', ()=>{
     isComposing = false;
     clearTimeout(deb);
-    sendDelta(input.value);
+    deb = setTimeout(()=>sendDelta(input.value), 60);
   });
   input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitSearch(); } });
   document.getElementById('kbSend').addEventListener('click', ()=>{ clearTimeout(deb); sendDelta(input.value); });
@@ -1163,6 +1173,7 @@ def main():
             dels = 0
         if len(text) > 500:
             text = text[:500]
+        print(f"[type] text={text!r} dels={dels}")
         async def _ensure_connected_and_type():
             max_attempts = 3
             for attempt in range(max_attempts):
@@ -1179,7 +1190,16 @@ def main():
                     for _ in range(dels):
                         remote.send_key_command("DEL")
                     if text:
-                        remote.send_text(text)
+                        if any(ord(c) > 127 for c in text):
+                            # CJK: one char per batch edit (start=end=0) — the
+                            # same message shape as proven single-char ASCII
+                            # sends. Some TV IMEs drop a multi-char CJK batch
+                            # edit, whose start/end (char-based) don't line up
+                            # with the value's byte length.
+                            for ch in text:
+                                remote.send_text(ch)
+                        else:
+                            remote.send_text(text)
                     set_connection_state(live=True, reconnecting=False, error=None)
                     return True
                 except Exception:
