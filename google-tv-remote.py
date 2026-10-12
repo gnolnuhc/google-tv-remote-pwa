@@ -721,21 +721,31 @@ function initKeyboard(){
   const toggleLabel = document.getElementById('kbToggleLabel');
   if(!panel || !input || !toggleLabel) return;
   let deb = null;
-  // Live typing: send the whole field per keystroke (debounced). The TV-side
-  // IME batch edit replaces the full field content, so the TV mirrors the phone.
-  function typeText(v){
-    if(v.length > 500) v = v.slice(0, 500);
-    fetch('/type?text='+encodeURIComponent(v), {cache:'no-store'}).catch(()=>{});
+  // The TV-side IME op is INSERT-at-cursor (commitText), not replace-field:
+  // sending the whole field per keystroke duplicates text on the TV.
+  // So we send only the delta vs what we last sent: DELs for removed chars,
+  // then the newly added suffix. The server applies DELs before text in one call.
+  let lastSent = "";
+  function sendDelta(newVal){
+    let i = 0;
+    const n = Math.min(lastSent.length, newVal.length);
+    while(i < n && lastSent[i] === newVal[i]) i++;
+    const dels = lastSent.length - i;
+    const ins = newVal.slice(i);
+    lastSent = newVal;
+    if(!dels && !ins) return;
+    fetch('/type?text='+encodeURIComponent(ins)+'&dels='+dels, {cache:'no-store'}).catch(()=>{});
+    playClick('KEYBOARD');
+    haptic();
   }
-  function scheduleType(){
-    const v = input.value;
+  function scheduleDelta(){
     clearTimeout(deb);
-    deb = setTimeout(()=>typeText(v), 250);
+    deb = setTimeout(()=>sendDelta(input.value), 250); // read fresh at fire time
   }
   function submitSearch(){
     clearTimeout(deb);
-    typeText(input.value);
-    setTimeout(()=>{ fetch('/press?key=ENTER', {cache:'no-store'}).catch(()=>{}); }, 350);
+    sendDelta(input.value);
+    setTimeout(()=>{ press('ENTER'); }, 600);
     toast('Searching\u2026');
   }
   document.getElementById('kbToggle').addEventListener('click', ()=>{
@@ -748,19 +758,19 @@ function initKeyboard(){
     playClick('KEYBOARD');
     haptic();
   });
-  input.addEventListener('input', scheduleType);
+  input.addEventListener('input', scheduleDelta);
   input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitSearch(); } });
-  document.getElementById('kbSend').addEventListener('click', ()=>{ clearTimeout(deb); typeText(input.value); playClick('KEYBOARD'); haptic(); });
-  document.getElementById('kbEnter').addEventListener('click', ()=>{ submitSearch(); playClick('KEYBOARD'); haptic(); });
+  document.getElementById('kbSend').addEventListener('click', ()=>{ clearTimeout(deb); sendDelta(input.value); });
+  document.getElementById('kbEnter').addEventListener('click', ()=>{ submitSearch(); });
   document.getElementById('kbBackspace').addEventListener('click', ()=>{
     if(input.value.length) input.value = input.value.slice(0,-1);
     clearTimeout(deb);
-    typeText(input.value); // full-string replace deletes the char on the TV too
-    playClick('KEYBOARD'); haptic();
+    sendDelta(input.value);
   });
   document.getElementById('kbClear').addEventListener('click', ()=>{
-    input.value=''; clearTimeout(deb); typeText('');
-    playClick('KEYBOARD'); haptic();
+    input.value = '';
+    clearTimeout(deb);
+    sendDelta('');
   });
   document.getElementById('kbClose').addEventListener('click', ()=>{
     panel.classList.remove('open'); toggleLabel.textContent='Keyboard'; input.blur();
@@ -1128,8 +1138,18 @@ def main():
 
     @app.route("/type")
     def type_route():
-        """Send phone-keyboard text to the TV's focused field via the remote IME channel."""
+        """Apply phone-keyboard input to the TV's focused field.
+
+        The TV-side IME op is INSERT-at-cursor, so the client sends only the
+        delta vs its last send: `dels` KEYCODE_DEL presses for removed chars,
+        then `text` with the newly typed suffix. Both apply here in order,
+        in a single call.
+        """
         text = request.args.get("text", "")
+        try:
+            dels = max(0, min(int(request.args.get("dels", "0")), 100))
+        except ValueError:
+            dels = 0
         if len(text) > 500:
             text = text[:500]
         async def _ensure_connected_and_type():
@@ -1143,10 +1163,12 @@ def main():
                         except Exception:
                             await asyncio.sleep(0.5)
                             continue
-                    # send_text is non-blocking (buffers into the protocol).
-                    # An emptied field mirrors as a single space: the library rejects
-                    # empty strings, and the next keystroke's full-string replace heals it.
-                    remote.send_text(text if text else " ")
+                    # send_key_command / send_text buffer into the protocol
+                    # (non-blocking); DELs buffer before the insert, so order holds.
+                    for _ in range(dels):
+                        remote.send_key_command("DEL")
+                    if text:
+                        remote.send_text(text)
                     set_connection_state(live=True, reconnecting=False, error=None)
                     return True
                 except Exception:
@@ -1157,9 +1179,9 @@ def main():
         # SMOOTH: Fire and forget - return immediately, no blocking
         try:
             asyncio.run_coroutine_threadsafe(_ensure_connected_and_type(), loop)
-            return jsonify({"status": "ok", "typed": text, "queued": True}), 200
+            return jsonify({"status": "ok", "typed": text, "dels": dels, "queued": True}), 200
         except Exception:
-            return jsonify({"status": "ok", "typed": text, "live": False, "reconnecting": True, "queued": True}), 200
+            return jsonify({"status": "ok", "typed": text, "dels": dels, "live": False, "reconnecting": True, "queued": True}), 200
 
     local_ip = get_local_ip()
     print(f"\n🚀 Premium Remote running! (Fixed concurrency + WOL + Last IP + Trackpad + Idle Fix + Status UI)")
