@@ -734,7 +734,7 @@ function initKeyboard(){
     const ins = newVal.slice(i);
     lastSent = newVal;
     if(!dels && !ins) return;
-    fetch('/type?text='+encodeURIComponent(ins)+'&dels='+dels, {cache:'no-store'}).catch(()=>{});
+    fetch('/type?text='+encodeURIComponent(ins)+'&dels='+dels+'&full='+encodeURIComponent(newVal), {cache:'no-store'}).catch(()=>{});
     playClick('KEYBOARD');
     haptic();
   }
@@ -1040,6 +1040,91 @@ def main():
     def run_async_nowait(coro):
         return asyncio.run_coroutine_threadsafe(coro, loop)
 
+    # --- Live IME field state -------------------------------------------------
+    # The TV validates every text batch edit against the LIVE state of the
+    # focused editor: ime_counter must equal the editor's own counter (sent on
+    # the IME key-inject when a field gains focus), field_counter must be the
+    # latest counter from the TV's text-field status (key-inject, plus the IME
+    # show-request the TV sends after every edit), and start/end must be the
+    # field length after the edit. androidtvremote2's send_text() gets none of
+    # these right (it reuses the {1,1} greeting counters and len(text)-1), so
+    # surfaces that check them silently drop its edits. We track the live state
+    # by observing inbound messages the library otherwise ignores, and build
+    # the batch edit ourselves.
+    _ime_state = {"ime_counter": None, "field_counter": None, "value": None}
+    _ime_hook = {"proto": None}
+
+    def _u16len(text):
+        # Android measures field positions in UTF-16 code units.
+        return len(text.encode("utf-16-le")) // 2
+
+    def _apply_field_status(tfs):
+        if tfs.counter_field:
+            _ime_state["field_counter"] = tfs.counter_field
+        _ime_state["value"] = tfs.value
+
+    def _track_ime_message(raw):
+        from androidtvremote2.remotemessage_pb2 import RemoteMessage
+        msg = RemoteMessage()
+        msg.ParseFromString(raw)
+        changed = False
+        if msg.HasField("remote_ime_key_inject"):
+            ki = msg.remote_ime_key_inject
+            if ki.HasField("app_info") and ki.app_info.counter:
+                _ime_state["ime_counter"] = ki.app_info.counter
+                changed = True
+            if ki.HasField("text_field_status"):
+                _apply_field_status(ki.text_field_status)
+                changed = True
+        if msg.HasField("remote_ime_show_request"):
+            _apply_field_status(msg.remote_ime_show_request.remote_text_field_status)
+            changed = True
+        if changed:
+            print(f"[ime] live state: ime_counter={_ime_state['ime_counter']} "
+                  f"field_counter={_ime_state['field_counter']} value={_ime_state['value']!r}")
+
+    def _install_ime_hook():
+        """Wrap the current protocol's inbound handler to track IME state.
+
+        The protocol object is recreated on every reconnect, so re-wrap when
+        the instance changes. Called from the press/type coroutines, which run
+        ahead of field interaction (D-pad navigation focuses the field).
+        """
+        proto = getattr(remote, "_remote_message_protocol", None)
+        if proto is None or _ime_hook["proto"] is proto:
+            return
+        orig = proto._handle_message
+        def _hooked(*args):
+            try:
+                _track_ime_message(args[-1])
+            except Exception:
+                pass
+            return orig(args[-1])
+        proto._handle_message = _hooked
+        _ime_hook["proto"] = proto
+
+    def _send_ime_text(proto, text, span_end):
+        """Send one text batch edit built the way the TV expects (see above).
+
+        Returns the (ime_counter, field_counter) used, for logging.
+        """
+        from androidtvremote2.remotemessage_pb2 import (
+            RemoteMessage, RemoteImeBatchEdit, RemoteEditInfo, RemoteImeObject)
+        ime_counter = _ime_state["ime_counter"] or proto.ime_counter
+        field_counter = _ime_state["field_counter"] or proto.ime_field_counter
+        msg = RemoteMessage()
+        msg.remote_ime_batch_edit.CopyFrom(RemoteImeBatchEdit(
+            ime_counter=ime_counter,
+            field_counter=field_counter,
+            edit_info=[RemoteEditInfo(
+                insert=1,
+                text_field_status=RemoteImeObject(
+                    start=span_end, end=span_end, value=text))],
+        ))
+        proto._reset_idle_disconnect_task()
+        proto._send_message(msg)
+        return ime_counter, field_counter
+
     def recreate_remote():
         """Recreate remote instance after power cycle - fixes stale transport"""
         nonlocal remote
@@ -1139,6 +1224,7 @@ def main():
                                 await asyncio.sleep(0.3)
                                 continue
                             raise ce
+                    _install_ime_hook()
                     remote.send_key_command(key)
                     set_connection_state(live=True, reconnecting=False, error=None)
                     return True
@@ -1161,18 +1247,24 @@ def main():
     def type_route():
         """Apply phone-keyboard input to the TV's focused field.
 
-        The TV-side IME op is INSERT-at-cursor, so the client sends only the
-        delta vs its last send: `dels` KEYCODE_DEL presses for removed chars,
-        then `text` with the newly typed suffix. Both apply here in order,
-        in a single call.
+        The client sends the delta vs its last send: `dels` KEYCODE_DEL
+        presses for removed chars, then `text` with the newly typed suffix,
+        plus `full` (its whole field) so the batch edit's span end can be the
+        true post-edit field length. The batch edit itself is built with the
+        TV's live IME counters (see _send_ime_text) — the library's send_text
+        sends stale greeting counters and len(text)-1, which strict TV
+        surfaces silently drop.
         """
         text = request.args.get("text", "")
+        full = request.args.get("full")
         try:
             dels = max(0, min(int(request.args.get("dels", "0")), 100))
         except ValueError:
             dels = 0
         if len(text) > 500:
             text = text[:500]
+        if full is not None and len(full) > 1000:
+            full = full[:1000]
         print(f"[type] text={text!r} dels={dels}")
         async def _ensure_connected_and_type():
             max_attempts = 3
@@ -1185,20 +1277,20 @@ def main():
                         except Exception:
                             await asyncio.sleep(0.5)
                             continue
-                    # send_key_command / send_text buffer into the protocol
+                    _install_ime_hook()
+                    # send_key_command / batch edits buffer into the protocol
                     # (non-blocking); DELs buffer before the insert, so order holds.
                     for _ in range(dels):
                         remote.send_key_command("DEL")
                     if text:
-                        if any(ord(c) > 127 for c in text):
-                            # CJK: one char per batch edit (start=end=0) — the
-                            # same message shape as proven single-char ASCII
-                            # sends. Some TV IMEs drop a multi-char CJK batch
-                            # edit, whose start/end (char-based) don't line up
-                            # with the value's byte length.
-                            for ch in text:
-                                remote.send_text(ch)
+                        proto = getattr(remote, "_remote_message_protocol", None)
+                        if proto is not None and full is not None:
+                            span_end = _u16len(full)
+                            ic, fc = _send_ime_text(proto, text, span_end)
+                            print(f"[type] batch edit: span_end={span_end} "
+                                  f"ime_counter={ic} field_counter={fc}")
                         else:
+                            # No field mirror (stale cached page): legacy path.
                             remote.send_text(text)
                     set_connection_state(live=True, reconnecting=False, error=None)
                     return True
