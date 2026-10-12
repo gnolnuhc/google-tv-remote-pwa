@@ -1102,6 +1102,7 @@ def main():
             return orig(args[-1])
         proto._handle_message = _hooked
         _ime_hook["proto"] = proto
+        print("[ime] hook installed on live protocol")
 
     def _send_ime_text(proto, text, span_end):
         """Send one text batch edit built the way the TV expects (see above).
@@ -1155,6 +1156,11 @@ def main():
                 time.sleep(10)
                 is_live = has_live_connection(remote)
                 set_connection_state(live=is_live)
+                if is_live:
+                    # Keep the IME state hook attached to the live protocol
+                    # from the start, so the focus-time key-inject (which
+                    # carries the live counters) is never missed.
+                    _install_ime_hook()
                 if not is_live:
                     if offline_since is None:
                         offline_since = time.time()
@@ -1285,7 +1291,13 @@ def main():
                     if text:
                         proto = getattr(remote, "_remote_message_protocol", None)
                         if proto is not None and full is not None:
-                            span_end = _u16len(full)
+                            if _ime_state["value"] is not None:
+                                # Ground truth: the TV's own reported field.
+                                # After `dels` deletions + this insert, its
+                                # length is the span end the TV validates.
+                                span_end = max(0, _u16len(_ime_state["value"]) - dels) + _u16len(text)
+                            else:
+                                span_end = _u16len(full)
                             ic, fc = _send_ime_text(proto, text, span_end)
                             print(f"[type] batch edit: span_end={span_end} "
                                   f"ime_counter={ic} field_counter={fc}")
